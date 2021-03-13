@@ -1,10 +1,11 @@
 import MetricsResponse from "./MetricsResponse";
 
 interface AggregateResponse {
-  type: string;
+  aggregate_type: string;
   aggregate_market_cap: number;
   aggregate_volume_last_24_hours: number;
-  dominance_vs_global?: number;
+  marketcap_dominance_vs_global_percent: number;
+  volume_dominance_vs_global_percent: number;
   coins: MetricsResponse[];
 }
 

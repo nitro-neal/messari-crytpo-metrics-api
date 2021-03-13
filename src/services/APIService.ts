@@ -19,7 +19,7 @@ const errorStatusCodes = [
 ];
 
 class APIService {
-  static handleErrorStatusCodes(response: AxiosResponse) {
+  handleErrorStatusCodes(response: AxiosResponse) {
     if (errorStatusCodes.includes(response.status)) {
       throw new Error(`Error with response status ${response.status}`);
     }
@@ -29,7 +29,7 @@ class APIService {
     }
   }
 
-  static async get(endpoint: string) {
+  async get(endpoint: string) {
     const input: RequestInfo = endpoint;
 
     const response = await axios.get(input);

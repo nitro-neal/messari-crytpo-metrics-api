@@ -1,72 +1,56 @@
+import APIService from "./APIService";
 import MetricsResponse from "../models/MetricsResponse";
 import AggregateResponse from "../models/AggregateResponse";
 import TagResponse from "../models/TagResponse";
 import SectorResponse from "../models/SectorResponse";
 
-import APIService from "./APIService";
-import * as assets from "../assets.json";
+const MESSARI_AGGREGATE_URL =
+  process.env.MESSARI_AGGREGATE_URL ||
+  "https://data.messari.io/api/v1/assets?limit=1000";
+const MESSARI_COIN_METRIC_URL =
+  process.env.MESSARI_COIN_METRIC_URL ||
+  "https://data.messari.io/api/v1/assets/";
+const MESSARI_COIN_NEWS_URL =
+  process.env.MESSARI_COIN_NEWS_URL || "https://data.messari.io/api/v1/news/";
 
-const AGGREGATE_MARKETCAP_LIMIT = 20000000;
+// 10 Minutes
+const CACHE_TTL = 10 * 60 * 1000;
+const AGGREGATE_MARKETCAP_LIMIT =
+  process.env.AGGREGATE_MARKETCAP_LIMIT || 20000000;
+
+enum AggregateType {
+  ALL,
+  TAG,
+  SECTOR,
+}
 
 class MetricsService extends APIService {
-  static async getTags(): Promise<TagResponse> {
-    // const rawResponse = await super.get(
-    //   `https://data.messari.io/api/v2/assets?with-metrics&with-profiles&limit=500`
-    // );
+  rawAggregateResponseCache: any;
+  cacheTimeStamp: Date;
+  aggregateMetricsCache: AggregateResponse;
 
-    const rawResponse = assets;
-
-    const tags: Set<string> = new Set();
-
-    for (const coinData of rawResponse.data) {
-      if (
-        coinData.profile.general.overview.tags &&
-        !tags.has(coinData.profile.general.overview.tags)
-      ) {
-        tags.add(coinData.profile.general.overview.tags);
-      }
-    }
-
-    const tagsResponse: TagResponse = {
-      tags: Array.from(tags),
-    };
-
-    return tagsResponse;
+  constructor() {
+    super();
+    this.populateCache();
   }
 
-  static async getSectors(): Promise<SectorResponse> {
-    // const rawResponse = await super.get(
-    //   `https://data.messari.io/api/v2/assets?with-metrics&with-profiles&limit=500`
-    // );
-
-    const rawResponse = assets;
-
-    const sectors: Set<string> = new Set();
-
-    for (const coinData of rawResponse.data) {
-      if (
-        coinData.profile.general.overview.sector &&
-        !sectors.has(coinData.profile.general.overview.sector)
-      ) {
-        sectors.add(coinData.profile.general.overview.sector);
-      }
+  private async populateCache() {
+    if (
+      !this.rawAggregateResponseCache ||
+      new Date().getTime() - this.cacheTimeStamp.getTime() > CACHE_TTL
+    ) {
+      this.cacheTimeStamp = new Date();
+      this.rawAggregateResponseCache = await super.get(MESSARI_AGGREGATE_URL);
+      this.aggregateMetricsCache = this.aggregateBy(AggregateType.ALL, []);
+      console.log("Cache populated.");
     }
-
-    const sectorsResponse: SectorResponse = {
-      sectors: Array.from(sectors),
-    };
-
-    return sectorsResponse;
   }
 
-  static async getCoinMetrics(coin: string): Promise<MetricsResponse> {
+  public async getCoinMetrics(coin: string): Promise<MetricsResponse> {
     const rawResponse = await super.get(
-      `https://data.messari.io/api/v1/assets/${coin}/metrics`
+      `${MESSARI_COIN_METRIC_URL}${coin}/metrics`
     );
-
-    const rawNewsResponse = await super.get(
-      `https://data.messari.io/api/v1/news/${coin}`
-    );
+    const rawNewsResponse = await super.get(`${MESSARI_COIN_NEWS_URL}${coin}`);
 
     const market_data = rawResponse.data.market_data;
     const marketcap_data = rawResponse.data.marketcap;
@@ -91,38 +75,31 @@ class MetricsService extends APIService {
     return metricsResponse;
   }
 
-  static async getAggregateMetrics(
+  public async getAggregateMetrics(
     tags: string[],
     sectors: string[]
   ): Promise<AggregateResponse> {
-    // const rawResponse = await super.get(
-    //   `https://data.messari.io/api/v2/assets?with-metrics&with-profiles&limit=500`
-    // );
-
-    const rawResponse = assets;
+    await this.populateCache();
 
     if (tags) {
-      return MetricsService.aggregateBy(rawResponse, "tag", tags);
+      return this.aggregateBy(AggregateType.TAG, tags);
     } else if (sectors) {
-      return MetricsService.aggregateBy(rawResponse, "sector", sectors);
+      return this.aggregateBy(AggregateType.SECTOR, sectors);
     } else {
-      return MetricsService.aggregateBy(rawResponse, "default", []);
+      return this.aggregateBy(AggregateType.ALL, []);
     }
   }
 
-  private static aggregateBy(
-    rawResponse: any,
-    aggregateType: string,
+  private aggregateBy(
+    aggregateType: AggregateType,
     tagOrSectors: string[]
-  ) {
+  ): AggregateResponse {
     let aggregateMarketCap = 0;
     let aggregateVolume = 0;
     const metricsResponses: MetricsResponse[] = [];
 
-    for (const coinData of rawResponse.data) {
-      if (
-        MetricsService.shouldAggregate(coinData, aggregateType, tagOrSectors)
-      ) {
+    for (const coinData of this.rawAggregateResponseCache.data) {
+      if (this.shouldAggregate(coinData, aggregateType, tagOrSectors)) {
         aggregateMarketCap += coinData.metrics.marketcap.current_marketcap_usd;
         aggregateVolume += coinData.metrics.market_data.volume_last_24_hours;
 
@@ -134,8 +111,8 @@ class MetricsService extends APIService {
             coinData.metrics.market_data.volume_last_24_hours,
           current_marketcap_usd:
             coinData.metrics.marketcap.current_marketcap_usd,
-          tag: coinData.profile.general.overview.tags,
-          sector: coinData.profile.general.overview.sector,
+          tag: coinData.profile.tag,
+          sector: coinData.profile.sector,
         };
 
         metricsResponses.push(metricsResponse);
@@ -143,22 +120,36 @@ class MetricsService extends APIService {
     }
 
     const aggregateResponse: AggregateResponse = {
-      type: aggregateType,
+      aggregate_type: `${AggregateType[
+        aggregateType
+      ].toLowerCase()} - ${tagOrSectors.toString()}`,
       aggregate_market_cap: aggregateMarketCap,
       aggregate_volume_last_24_hours: aggregateVolume,
+      marketcap_dominance_vs_global_percent:
+        this.aggregateMetricsCache === undefined
+          ? 0
+          : (aggregateMarketCap /
+              this.aggregateMetricsCache.aggregate_market_cap) *
+            100,
+      volume_dominance_vs_global_percent:
+        this.aggregateMetricsCache === undefined
+          ? 0
+          : (aggregateVolume /
+              this.aggregateMetricsCache.aggregate_volume_last_24_hours) *
+            100,
       coins: metricsResponses,
     };
 
     return aggregateResponse;
   }
 
-  private static shouldAggregate(
+  private shouldAggregate(
     coinData: any,
-    aggregateType: string,
+    aggregateType: AggregateType,
     tagOrSectors: string[]
   ) {
     if (
-      aggregateType === "default" &&
+      aggregateType === AggregateType.ALL &&
       coinData.metrics.marketcap.current_marketcap_usd >=
         AGGREGATE_MARKETCAP_LIMIT
     ) {
@@ -166,26 +157,56 @@ class MetricsService extends APIService {
     }
 
     if (
-      aggregateType === "tag" &&
-      coinData.profile.general.overview.tags &&
-      tagOrSectors.includes(
-        coinData.profile.general.overview.tags.toLowerCase()
-      )
+      aggregateType === AggregateType.TAG &&
+      coinData.profile.tag &&
+      tagOrSectors.includes(coinData.profile.tag.toLowerCase())
     ) {
       return true;
     }
 
     if (
-      aggregateType === "sector" &&
-      coinData.profile.general.overview.sector &&
-      tagOrSectors.includes(
-        coinData.profile.general.overview.sector.toLowerCase()
-      )
+      aggregateType === AggregateType.SECTOR &&
+      coinData.profile.sector &&
+      tagOrSectors.includes(coinData.profile.sector.toLowerCase())
     ) {
       return true;
     }
 
     return false;
+  }
+
+  public async getTags(): Promise<TagResponse> {
+    await this.populateCache();
+    const tags: Set<string> = new Set();
+
+    for (const coinData of this.rawAggregateResponseCache.data) {
+      if (coinData.profile.tag && !tags.has(coinData.profile.tag)) {
+        tags.add(coinData.profile.tag);
+      }
+    }
+
+    const tagsResponse: TagResponse = {
+      tags: Array.from(tags),
+    };
+
+    return tagsResponse;
+  }
+
+  public async getSectors(): Promise<SectorResponse> {
+    await this.populateCache();
+    const sectors: Set<string> = new Set();
+
+    for (const coinData of this.rawAggregateResponseCache.data) {
+      if (coinData.profile.sector && !sectors.has(coinData.profile.sector)) {
+        sectors.add(coinData.profile.sector);
+      }
+    }
+
+    const sectorsResponse: SectorResponse = {
+      sectors: Array.from(sectors),
+    };
+
+    return sectorsResponse;
   }
 }
 
